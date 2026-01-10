@@ -1,16 +1,19 @@
 # Skin Sync
 
-A Kodi add-on for CoreELEC that synchronizes skin settings between devices via SSH.
+A Kodi add-on for CoreELEC that synchronizes skin settings, widget configurations, and keymaps between devices via SSH.
 
 ## Features
 
+- **Push & Pull Sync** - Push settings to another device or pull from another device
+- **Multi-Device Sync** - Push to all paired devices at once
+- **Selective Sync** - Choose what to sync: skin settings, widgets, keymaps
+- **Automatic Backups** - Creates timestamped backups before any sync operation
+- **Widget Sync** - Syncs widget configurations from script.skinvariables
+- **Keymaps Sync** - Optionally sync keyboard and remote mappings
 - **SSH Key Management** - Generates ED25519 SSH keys for secure passwordless authentication
 - **Avahi/mDNS Discovery** - Fast device discovery using Zeroconf, with IP scan fallback
-- **Manual Device Entry** - Add devices manually by IP address if auto-discovery doesn't find them
+- **Manual Device Entry** - Add devices manually by IP address
 - **Paired Devices** - Remembers devices you've synced with for quick access
-- **One-Time Setup** - Enter your password once, then enjoy passwordless syncing
-- **Skin Sync** - Copies your entire skin configuration to the target device
-- **Remote Restart** - Automatically restarts Kodi on the target device after sync
 
 ## Requirements
 
@@ -36,13 +39,49 @@ A Kodi add-on for CoreELEC that synchronizes skin settings between devices via S
    - Scan your network for other CoreELEC devices
    - Copy your public key to discovered devices for passwordless access
 
-### Syncing Skins
+### Main Menu
 
-1. Launch Skin Sync
-2. Select a target device from the list (shows hostname and IP)
-3. Or choose "Add device manually..." to enter an IP address
-4. Confirm the sync operation
-5. Your skin settings will be copied and Kodi will restart on the target device
+After setup, the main menu offers:
+
+| Option | Description |
+|--------|-------------|
+| **Push to device...** | Send your settings to another device |
+| **Push to ALL paired devices** | Sync to all remembered devices at once |
+| **Pull from device...** | Copy settings FROM another device to yours |
+| **Create backup** | Manually create a backup of your current settings |
+| **Settings** | Manage paired devices, reset SSH keys |
+
+### Syncing
+
+1. Choose Push or Pull from the main menu
+2. Select a target device from the list
+3. Choose what to sync (multiselect):
+   - Skin settings
+   - Widget configurations
+   - Keymaps
+4. Confirm the operation
+5. A backup is created automatically before syncing
+6. Settings are copied and Kodi restarts on the affected device
+
+## What Gets Synced
+
+| Component | Location | Description |
+|-----------|----------|-------------|
+| Skin Settings | `/storage/.kodi/userdata/addon_data/skin.xxx/` | All skin-specific settings and customizations |
+| Widget Configs | `/storage/.kodi/userdata/addon_data/script.skinvariables/nodes/skin.xxx/` | Custom widget configurations |
+| Keymaps | `/storage/.kodi/userdata/keymaps/` | Keyboard and remote mappings |
+
+## Backups
+
+Backups are stored in:
+```
+/storage/.kodi/userdata/addon_data/script.skinsync/backups/
+```
+
+Each backup is timestamped and contains:
+- `skin_settings/` - Skin configuration files
+- `widgets/` - Widget JSON configurations
+- `keymaps/` - Keymap XML files
 
 ## Settings
 
@@ -65,31 +104,24 @@ Access via **Add-ons → Program add-ons → Skin Sync → Configure**
 |---------|-------------|
 | Reset SSH Keys | Regenerate keys and run setup again |
 
-## How It Works
-
-Skin Sync copies the contents of your current skin's `addon_data` directory:
-
-```
-/storage/.kodi/userdata/addon_data/skin.{your-skin}/
-```
-
-This includes all skin-specific settings, widget configurations, and customizations.
-
 ## Troubleshooting
 
 **No devices found during scan**
 - Ensure target devices are powered on and connected to the network
 - Check that SSH is enabled on target devices
 - Use "Add device manually..." to enter the IP address directly
-- Try specifying your network prefix in settings if IP scan is slow
 
 **Authentication failed**
 - Use the "Reset SSH Keys" option in settings to start fresh
 - Ensure you're using the correct password (default CoreELEC password is `coreelec`)
 
 **Sync completed but settings not applied**
-- The target Kodi should restart automatically
-- If not, manually restart Kodi on the target device
+- Kodi restarts automatically after sync
+- If settings don't appear, try restarting Kodi manually
+
+**Widgets not syncing**
+- Widget configs are stored separately in `script.skinvariables`
+- Ensure you select "Widget configurations" in the sync options
 
 ## License
 
