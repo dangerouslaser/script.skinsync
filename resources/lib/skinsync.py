@@ -128,112 +128,96 @@ class SkinSync:
         except:
             return False
     
-    def is_coreelec_with_password(self, ip, password):
-        """Check if device is CoreELEC using password auth."""
-        try:
-            import pty
-            import select
-            import termios
-            import tty
+    def run_ssh_with_password(self, ip, password, remote_cmd, timeout=15):
+        """Run SSH command with password authentication using script command for proper TTY."""
+        import pty
+        import select
 
-            self.log(f"Checking {ip} with password auth...")
+        self.log(f"Running SSH to {ip}: {remote_cmd[:50]}...")
 
-            # Create PTY
-            master, slave = pty.openpty()
+        # Use script command to create a proper TTY environment
+        ssh_cmd = f"ssh -tt -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no {self.username}@{ip} '{remote_cmd}'"
 
-            # Set raw mode on the slave to prevent buffering issues
-            try:
-                tty.setraw(slave)
-            except:
-                pass
+        master, slave = pty.openpty()
 
-            cmd = [
-                "ssh",
-                "-tt",  # Force pseudo-terminal allocation
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "PreferredAuthentications=password",
-                "-o", "PubkeyAuthentication=no",
-                "-o", "NumberOfPasswordPrompts=1",
-                f"{self.username}@{ip}",
-                "test -d /storage/.kodi && echo COREELEC_OK"
-            ]
+        env = os.environ.copy()
+        env['TERM'] = 'vt100'
 
-            env = os.environ.copy()
-            env['TERM'] = 'xterm'
+        process = subprocess.Popen(
+            ['script', '-q', '-c', ssh_cmd, '/dev/null'],
+            stdin=master,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+            env=env
+        )
 
-            process = subprocess.Popen(
-                cmd,
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                close_fds=True,
-                env=env,
-                preexec_fn=os.setsid
-            )
-            os.close(slave)
+        os.close(slave)
 
-            output = b""
-            password_sent = False
-            start_time = time.time()
+        output = b""
+        password_sent = False
+        start_time = time.time()
 
-            while time.time() - start_time < 15:
-                ready, _, _ = select.select([master], [], [], 0.1)
-                if ready:
-                    try:
+        while time.time() - start_time < timeout:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    data = os.read(master, 4096)
+                    if not data:
+                        break
+                    output += data
+                    self.log(f"SSH output from {ip}: {data}")
+
+                    output_lower = output.lower()
+                    if not password_sent and b"password" in output_lower:
+                        time.sleep(0.1)
+                        os.write(master, (password + "\n").encode())
+                        password_sent = True
+                        self.log(f"Password sent to {ip}")
+
+                except OSError as e:
+                    self.log(f"OSError: {e}")
+                    break
+
+            if process.poll() is not None:
+                # Read remaining output
+                try:
+                    while True:
+                        ready, _, _ = select.select([master], [], [], 0.1)
+                        if not ready:
+                            break
                         data = os.read(master, 4096)
                         if not data:
                             break
                         output += data
-                        self.log(f"SSH output from {ip}: {data}")
+                except:
+                    pass
+                break
 
-                        # Check for password prompt (various formats)
-                        output_lower = output.lower()
-                        if not password_sent and b"password" in output_lower:
-                            time.sleep(0.2)
-                            os.write(master, (password + "\n").encode())
-                            password_sent = True
-                            self.log(f"Password sent to {ip}")
+        try:
+            process.terminate()
+            os.close(master)
+        except:
+            pass
 
-                        if b"COREELEC_OK" in output:
-                            self.log(f"CoreELEC verified on {ip}")
-                            try:
-                                process.terminate()
-                                os.close(master)
-                            except:
-                                pass
-                            return True
+        self.log(f"Final output from {ip}: {output}")
+        return output, password_sent
 
-                        # Check for auth failure (only after password was sent)
-                        if password_sent and b"permission denied" in output_lower:
-                            self.log(f"Auth failed on {ip} - wrong password?")
-                            break
+    def is_coreelec_with_password(self, ip, password):
+        """Check if device is CoreELEC using password auth."""
+        try:
+            output, password_sent = self.run_ssh_with_password(
+                ip, password,
+                "test -d /storage/.kodi && echo COREELEC_OK",
+                timeout=15
+            )
 
-                    except OSError as e:
-                        self.log(f"OSError reading from {ip}: {e}")
-                        break
+            if b"COREELEC_OK" in output:
+                self.log(f"CoreELEC verified on {ip}")
+                return True
 
-                if process.poll() is not None:
-                    # Process ended, read any remaining output
-                    try:
-                        ready, _, _ = select.select([master], [], [], 0.1)
-                        if ready:
-                            data = os.read(master, 4096)
-                            if data:
-                                output += data
-                                self.log(f"SSH final read from {ip}: {data}")
-                    except:
-                        pass
-                    break
-
-            self.log(f"Final output from {ip}: {output}")
-
-            try:
-                process.terminate()
-                os.close(master)
-            except:
-                pass
+            if password_sent and b"permission denied" in output.lower():
+                self.log(f"Auth failed on {ip} - wrong password?")
 
             return False
 
@@ -250,106 +234,18 @@ class SkinSync:
             return False
 
         try:
-            import pty
-            import select
-            import tty
-
-            # Create PTY
-            master, slave = pty.openpty()
-
-            # Set raw mode on the slave
-            try:
-                tty.setraw(slave)
-            except:
-                pass
-
-            # Command to append key to authorized_keys
             remote_cmd = f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{public_key}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sort -u -o ~/.ssh/authorized_keys ~/.ssh/authorized_keys && echo KEY_COPIED_OK"
 
-            cmd = [
-                "ssh",
-                "-tt",
-                "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "PreferredAuthentications=password",
-                "-o", "PubkeyAuthentication=no",
-                "-o", "NumberOfPasswordPrompts=1",
-                f"{self.username}@{ip}",
-                remote_cmd
-            ]
-
-            env = os.environ.copy()
-            env['TERM'] = 'xterm'
-
-            process = subprocess.Popen(
-                cmd,
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                close_fds=True,
-                env=env,
-                preexec_fn=os.setsid
+            output, password_sent = self.run_ssh_with_password(
+                ip, password, remote_cmd, timeout=30
             )
-            os.close(slave)
 
-            output = b""
-            password_sent = False
-            start_time = time.time()
+            if b"KEY_COPIED_OK" in output:
+                self.log(f"Successfully copied key to {ip}")
+                return True
 
-            while time.time() - start_time < 30:
-                ready, _, _ = select.select([master], [], [], 0.1)
-                if ready:
-                    try:
-                        data = os.read(master, 4096)
-                        if not data:
-                            break
-                        output += data
-                        self.log(f"Key copy output from {ip}: {data}")
-
-                        output_lower = output.lower()
-                        if not password_sent and b"password" in output_lower:
-                            time.sleep(0.2)
-                            os.write(master, (password + "\n").encode())
-                            password_sent = True
-                            self.log(f"Password sent for key copy to {ip}")
-
-                        if b"KEY_COPIED_OK" in output:
-                            self.log(f"Successfully copied key to {ip}")
-                            try:
-                                process.terminate()
-                                os.close(master)
-                            except:
-                                pass
-                            return True
-
-                        if password_sent and b"permission denied" in output_lower:
-                            self.log(f"Auth failed copying key to {ip}")
-                            break
-
-                    except OSError as e:
-                        self.log(f"OSError copying key to {ip}: {e}")
-                        break
-
-                if process.poll() is not None:
-                    try:
-                        ready, _, _ = select.select([master], [], [], 0.1)
-                        if ready:
-                            data = os.read(master, 4096)
-                            if data:
-                                output += data
-                                self.log(f"Key copy final read from {ip}: {data}")
-                    except:
-                        pass
-                    break
-
-            self.log(f"Key copy final output from {ip}: {output}")
-
-            try:
-                process.terminate()
-                os.close(master)
-            except:
-                pass
+            if password_sent and b"permission denied" in output.lower():
+                self.log(f"Auth failed copying key to {ip}")
 
             self.log(f"Failed to copy key to {ip}", xbmc.LOGERROR)
             return False
