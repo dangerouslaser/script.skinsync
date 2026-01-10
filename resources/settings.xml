@@ -1,28 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <settings version="2">
-    <section id="general">
-        <category id="connection" label="Connection">
-            <group id="ssh">
-                <setting id="ssh_username" type="string" label="SSH Username" default="root">
+    <section id="general" label="Skin Sync Settings">
+        <category id="connection" label="30001">
+            <group id="ssh" label="30002">
+                <setting id="ssh_username" type="string" label="30003" default="root">
                     <level>0</level>
                     <default>root</default>
                     <control type="edit" format="string"/>
                 </setting>
-                <setting id="network_prefix" type="string" label="Network Prefix" default="">
+                <setting id="network_prefix" type="string" label="30004" default="">
                     <level>1</level>
                     <default></default>
                     <control type="edit" format="string"/>
-                    <help>Leave blank to auto-detect. Example: 192.168.1</help>
+                    <help>30005</help>
                 </setting>
             </group>
         </category>
-        <category id="advanced" label="Advanced">
-            <group id="setup">
-                <setting id="reset_keys" type="action" label="Reset SSH Keys">
+        <category id="devices" label="30010">
+            <group id="paired" label="30011">
+                <setting id="view_paired" type="action" label="30012">
+                    <level>0</level>
+                    <control type="button" format="action"/>
+                    <data action="RunScript(script.skinsync, view_paired)"/>
+                </setting>
+                <setting id="remove_paired" type="action" label="30013">
+                    <level>0</level>
+                    <control type="button" format="action"/>
+                    <data action="RunScript(script.skinsync, remove_paired)"/>
+                </setting>
+            </group>
+        </category>
+        <category id="advanced" label="30020">
+            <group id="setup" label="30021">
+                <setting id="reset_keys" type="action" label="30022">
                     <level>2</level>
                     <control type="button" format="action"/>
                     <data action="RunScript(script.skinsync, reset_keys)"/>
-                    <help>Remove existing SSH keys and run setup again</help>
+                    <help>30023</help>
                 </setting>
             </group>
         </category>

@@ -21,11 +21,15 @@ from skinsync import SkinSync
 def main():
     # Check for command line arguments
     args = sys.argv[1] if len(sys.argv) > 1 else None
-    
+
     sync = SkinSync(ADDON)
-    
+
     if args == "reset_keys":
         sync.reset_keys()
+    elif args == "view_paired":
+        sync.view_paired_devices()
+    elif args == "remove_paired":
+        sync.remove_paired_device_dialog()
     else:
         sync.run()
 

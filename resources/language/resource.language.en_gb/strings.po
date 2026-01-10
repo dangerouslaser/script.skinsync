@@ -1,0 +1,64 @@
+# Kodi Media Center language file
+# Addon Name: Skin Sync
+# Addon id: script.skinsync
+
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en\n"
+
+# Connection category
+msgctxt "#30001"
+msgid "Connection"
+msgstr ""
+
+msgctxt "#30002"
+msgid "SSH Settings"
+msgstr ""
+
+msgctxt "#30003"
+msgid "SSH Username"
+msgstr ""
+
+msgctxt "#30004"
+msgid "Network Prefix"
+msgstr ""
+
+msgctxt "#30005"
+msgid "Leave blank to auto-detect. Example: 192.168.1"
+msgstr ""
+
+# Devices category
+msgctxt "#30010"
+msgid "Paired Devices"
+msgstr ""
+
+msgctxt "#30011"
+msgid "Device Management"
+msgstr ""
+
+msgctxt "#30012"
+msgid "View Paired Devices"
+msgstr ""
+
+msgctxt "#30013"
+msgid "Remove Paired Device"
+msgstr ""
+
+# Advanced category
+msgctxt "#30020"
+msgid "Advanced"
+msgstr ""
+
+msgctxt "#30021"
+msgid "Setup"
+msgstr ""
+
+msgctxt "#30022"
+msgid "Reset SSH Keys"
+msgstr ""
+
+msgctxt "#30023"
+msgid "Remove existing SSH keys and run setup again"
+msgstr ""

@@ -6,28 +6,113 @@ SkinSync - Main library for skin synchronization
 import xbmc
 import xbmcgui
 import xbmcaddon
+import xbmcvfs
 import subprocess
 import socket
 import os
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class SkinSync:
     """Main class for skin synchronization between CoreELEC devices."""
-    
+
     SSH_DIR = "/storage/.ssh"
     KEY_FILE = "/storage/.ssh/id_ed25519"
     KEY_FILE_PUB = "/storage/.ssh/id_ed25519.pub"
     KODI_ADDON_DATA = "/storage/.kodi/userdata/addon_data"
-    
+
     def __init__(self, addon):
         self.addon = addon
+        self.addon_data_path = xbmcvfs.translatePath(addon.getAddonInfo('profile'))
+        self.paired_devices_file = os.path.join(self.addon_data_path, 'paired_devices.json')
         self.username = addon.getSetting('ssh_username') or 'root'
         self.network_prefix = addon.getSetting('network_prefix') or None
         self.dialog = xbmcgui.Dialog()
         self.progress = None
-        
+
+        # Ensure addon data directory exists
+        if not os.path.exists(self.addon_data_path):
+            os.makedirs(self.addon_data_path)
+
+    def load_paired_devices(self):
+        """Load paired devices from storage."""
+        try:
+            if os.path.exists(self.paired_devices_file):
+                with open(self.paired_devices_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            self.log(f"Error loading paired devices: {e}", xbmc.LOGERROR)
+        return []
+
+    def save_paired_devices(self, devices):
+        """Save paired devices to storage."""
+        try:
+            with open(self.paired_devices_file, 'w') as f:
+                json.dump(devices, f, indent=2)
+            self.log(f"Saved {len(devices)} paired devices")
+        except Exception as e:
+            self.log(f"Error saving paired devices: {e}", xbmc.LOGERROR)
+
+    def add_paired_device(self, ip, name=None):
+        """Add a device to the paired devices list."""
+        devices = self.load_paired_devices()
+        # Check if already exists
+        for d in devices:
+            if d.get('ip') == ip:
+                return  # Already paired
+        devices.append({
+            'ip': ip,
+            'name': name or ip,
+            'added': time.strftime('%Y-%m-%d %H:%M:%S')
+        })
+        self.save_paired_devices(devices)
+
+    def remove_paired_device(self, ip):
+        """Remove a device from the paired devices list."""
+        devices = self.load_paired_devices()
+        devices = [d for d in devices if d.get('ip') != ip]
+        self.save_paired_devices(devices)
+
+    def get_paired_devices_string(self):
+        """Get a formatted string of paired devices for settings display."""
+        devices = self.load_paired_devices()
+        if not devices:
+            return "No paired devices"
+        return ", ".join([d.get('ip', 'unknown') for d in devices])
+
+    def view_paired_devices(self):
+        """Show a dialog with all paired devices."""
+        devices = self.load_paired_devices()
+        if not devices:
+            self.dialog.ok("Paired Devices", "No devices have been paired yet.\n\nRun Skin Sync and add a device to pair with it.")
+            return
+
+        lines = []
+        for d in devices:
+            ip = d.get('ip', 'unknown')
+            added = d.get('added', 'unknown')
+            lines.append(f"{ip}  (added: {added})")
+
+        self.dialog.ok("Paired Devices", "\n".join(lines))
+
+    def remove_paired_device_dialog(self):
+        """Show a dialog to select and remove a paired device."""
+        devices = self.load_paired_devices()
+        if not devices:
+            self.dialog.ok("Remove Device", "No paired devices to remove.")
+            return
+
+        device_list = [d.get('ip', 'unknown') for d in devices]
+        selected = self.dialog.select("Select device to remove", device_list)
+
+        if selected >= 0:
+            ip = device_list[selected]
+            if self.dialog.yesno("Confirm Removal", f"Remove {ip} from paired devices?"):
+                self.remove_paired_device(ip)
+                self.dialog.notification("Skin Sync", f"Removed {ip}", xbmcgui.NOTIFICATION_INFO)
+
     def log(self, message, level=xbmc.LOGINFO):
         """Log message to Kodi log."""
         xbmc.log(f"[SkinSync] {message}", level)
@@ -312,11 +397,13 @@ class SkinSync:
         if not key_installed and password:
             if self.copy_key_to_device(ip, password):
                 device["key_installed"] = True
-                self.dialog.notification("Skin Sync", f"Added {ip}", xbmcgui.NOTIFICATION_INFO)
+                self.add_paired_device(ip)
+                self.dialog.notification("Skin Sync", f"Paired with {ip}", xbmcgui.NOTIFICATION_INFO)
             else:
                 self.dialog.notification("Skin Sync", f"Added {ip} (key copy failed)", xbmcgui.NOTIFICATION_WARNING)
         else:
-            self.dialog.notification("Skin Sync", f"Added {ip}", xbmcgui.NOTIFICATION_INFO)
+            self.add_paired_device(ip)
+            self.dialog.notification("Skin Sync", f"Paired with {ip}", xbmcgui.NOTIFICATION_INFO)
 
         return device
 
@@ -358,13 +445,26 @@ class SkinSync:
         for i, ip in enumerate(open_ports):
             if progress_callback:
                 progress_callback(50 + int((i + 1) / len(open_ports) * 50), f"Checking {ip}...")
-            
+
             # Try without password first (if keys are set up)
             if self.keys_exist() and self.is_coreelec(ip):
                 devices.append({"ip": ip, "key_installed": True})
+                # Auto-add to paired devices if not already there
+                self.add_paired_device(ip)
             elif password and self.is_coreelec_with_password(ip, password):
                 devices.append({"ip": ip, "key_installed": False})
-        
+
+        # Include paired devices that weren't found in scan (might be offline or on different subnet)
+        found_ips = {d['ip'] for d in devices}
+        paired = self.load_paired_devices()
+        for pd in paired:
+            if pd.get('ip') not in found_ips:
+                # Check if this paired device is reachable
+                ip = pd.get('ip')
+                if self.keys_exist() and self.is_coreelec(ip):
+                    devices.append({"ip": ip, "key_installed": True, "paired": True})
+                    self.log(f"Added paired device {ip} from saved list")
+
         self.log(f"Found {len(devices)} CoreELEC devices")
         return devices
     
