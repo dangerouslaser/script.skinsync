@@ -630,6 +630,16 @@ class SkinSync:
         skinvariables_viewtypes = os.path.join(skinvariables_path, f"{skin_name}-viewtypes.json")
 
         try:
+            # Stop Kodi on target first (prevents it from overwriting settings)
+            self.log(f"Stopping Kodi on {target_ip}")
+            subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                 f"{self.username}@{target_ip}", "systemctl stop kodi"],
+                capture_output=True,
+                timeout=15
+            )
+            time.sleep(2)
+
             # Ensure target directories exist
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
@@ -677,12 +687,11 @@ class SkinSync:
                     timeout=30
                 )
 
-            # Reload skin on target (faster than restarting Kodi)
-            self.log(f"Reloading skin on {target_ip}")
+            # Start Kodi on target
+            self.log(f"Starting Kodi on {target_ip}")
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}",
-                 "kodi-send --action='ReloadSkin()'"],
+                 f"{self.username}@{target_ip}", "systemctl start kodi"],
                 capture_output=True,
                 timeout=10
             )
