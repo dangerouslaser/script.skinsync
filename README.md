@@ -5,7 +5,9 @@ A Kodi add-on for CoreELEC that synchronizes skin settings between devices via S
 ## Features
 
 - **SSH Key Management** - Generates ED25519 SSH keys for secure passwordless authentication
-- **Network Discovery** - Automatically scans your local network to find CoreELEC devices
+- **Avahi/mDNS Discovery** - Fast device discovery using Zeroconf, with IP scan fallback
+- **Manual Device Entry** - Add devices manually by IP address if auto-discovery doesn't find them
+- **Paired Devices** - Remembers devices you've synced with for quick access
 - **One-Time Setup** - Enter your password once, then enjoy passwordless syncing
 - **Skin Sync** - Copies your entire skin configuration to the target device
 - **Remote Restart** - Automatically restarts Kodi on the target device after sync
@@ -37,19 +39,31 @@ A Kodi add-on for CoreELEC that synchronizes skin settings between devices via S
 ### Syncing Skins
 
 1. Launch Skin Sync
-2. Select a target device from the list of discovered devices
-3. Confirm the sync operation
-4. Your skin settings will be copied and Kodi will restart on the target device
+2. Select a target device from the list (shows hostname and IP)
+3. Or choose "Add device manually..." to enter an IP address
+4. Confirm the sync operation
+5. Your skin settings will be copied and Kodi will restart on the target device
 
 ## Settings
 
 Access via **Add-ons → Program add-ons → Skin Sync → Configure**
 
+### Connection
 | Setting | Description | Default |
 |---------|-------------|---------|
 | SSH Username | Username for SSH connections | `root` |
 | Network Prefix | Network to scan (e.g., `192.168.1`) | Auto-detect |
-| Reset SSH Keys | Regenerate keys and run setup again | - |
+
+### Paired Devices
+| Setting | Description |
+|---------|-------------|
+| View Paired Devices | Shows all devices you've synced with |
+| Remove Paired Device | Remove a device from the paired list |
+
+### Advanced
+| Setting | Description |
+|---------|-------------|
+| Reset SSH Keys | Regenerate keys and run setup again |
 
 ## How It Works
 
@@ -66,7 +80,8 @@ This includes all skin-specific settings, widget configurations, and customizati
 **No devices found during scan**
 - Ensure target devices are powered on and connected to the network
 - Check that SSH is enabled on target devices
-- Try manually specifying your network prefix in settings
+- Use "Add device manually..." to enter the IP address directly
+- Try specifying your network prefix in settings if IP scan is slow
 
 **Authentication failed**
 - Use the "Reset SSH Keys" option in settings to start fresh
