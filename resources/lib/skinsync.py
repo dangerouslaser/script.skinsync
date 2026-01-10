@@ -22,11 +22,14 @@ class SkinSync:
     KEY_FILE = "/storage/.ssh/id_ed25519"
     KEY_FILE_PUB = "/storage/.ssh/id_ed25519.pub"
     KODI_ADDON_DATA = "/storage/.kodi/userdata/addon_data"
+    KODI_USERDATA = "/storage/.kodi/userdata"
+    KEYMAPS_PATH = "/storage/.kodi/userdata/keymaps"
 
     def __init__(self, addon):
         self.addon = addon
         self.addon_data_path = xbmcvfs.translatePath(addon.getAddonInfo('profile'))
         self.paired_devices_file = os.path.join(self.addon_data_path, 'paired_devices.json')
+        self.backup_dir = os.path.join(self.addon_data_path, 'backups')
         self.username = addon.getSetting('ssh_username') or 'root'
         self.network_prefix = addon.getSetting('network_prefix') or None
         self.dialog = xbmcgui.Dialog()
@@ -35,6 +38,8 @@ class SkinSync:
         # Ensure addon data directory exists
         if not os.path.exists(self.addon_data_path):
             os.makedirs(self.addon_data_path)
+        if not os.path.exists(self.backup_dir):
+            os.makedirs(self.backup_dir)
 
     def load_paired_devices(self):
         """Load paired devices from storage."""
@@ -609,17 +614,93 @@ class SkinSync:
 
         self.log(f"Found {len(devices)} CoreELEC devices total")
         return devices
-    
-    def sync_skin_to_device(self, target_ip):
+
+    def create_backup(self):
+        """Create a backup of current skin settings, widgets, and keymaps."""
+        skin_name = self.get_current_skin()
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        backup_path = os.path.join(self.backup_dir, f"{skin_name}_{timestamp}")
+
+        self.log(f"Creating backup at {backup_path}")
+
+        try:
+            os.makedirs(backup_path, exist_ok=True)
+
+            # Backup skin settings
+            skin_path = self.get_skin_path()
+            if os.path.exists(skin_path):
+                skin_backup = os.path.join(backup_path, 'skin_settings')
+                os.makedirs(skin_backup, exist_ok=True)
+                for item in os.listdir(skin_path):
+                    src = os.path.join(skin_path, item)
+                    dst = os.path.join(skin_backup, item)
+                    if os.path.isfile(src):
+                        import shutil
+                        shutil.copy2(src, dst)
+
+            # Backup skinvariables nodes
+            skinvariables_nodes = os.path.join(self.KODI_ADDON_DATA, "script.skinvariables", "nodes", skin_name)
+            if os.path.exists(skinvariables_nodes):
+                widgets_backup = os.path.join(backup_path, 'widgets')
+                os.makedirs(widgets_backup, exist_ok=True)
+                for item in os.listdir(skinvariables_nodes):
+                    src = os.path.join(skinvariables_nodes, item)
+                    dst = os.path.join(widgets_backup, item)
+                    if os.path.isfile(src):
+                        import shutil
+                        shutil.copy2(src, dst)
+
+            # Backup keymaps
+            if os.path.exists(self.KEYMAPS_PATH):
+                keymaps_backup = os.path.join(backup_path, 'keymaps')
+                os.makedirs(keymaps_backup, exist_ok=True)
+                for item in os.listdir(self.KEYMAPS_PATH):
+                    src = os.path.join(self.KEYMAPS_PATH, item)
+                    dst = os.path.join(keymaps_backup, item)
+                    if os.path.isfile(src):
+                        import shutil
+                        shutil.copy2(src, dst)
+
+            self.log(f"Backup created successfully at {backup_path}")
+            return backup_path
+
+        except Exception as e:
+            self.log(f"Backup failed: {e}", xbmc.LOGERROR)
+            return None
+
+    def get_sync_options(self):
+        """Show dialog to select what to sync."""
+        options = [
+            ("Skin Settings", "settings"),
+            ("Widget Configurations", "widgets"),
+            ("Keymaps", "keymaps"),
+        ]
+
+        # Use multiselect
+        selected = self.dialog.multiselect(
+            "Select what to sync",
+            [o[0] for o in options],
+            preselect=[0, 1]  # Default: settings and widgets
+        )
+
+        if selected is None:
+            return None
+
+        return [options[i][1] for i in selected]
+
+    def sync_skin_to_device(self, target_ip, sync_options=None, do_backup=True):
         """Sync current skin settings to target device."""
+        if sync_options is None:
+            sync_options = ["settings", "widgets"]  # Default options
+
         skin_path = self.get_skin_path()
         skin_name = self.get_current_skin()
 
-        if not os.path.exists(skin_path):
+        if "settings" in sync_options and not os.path.exists(skin_path):
             self.dialog.notification("Skin Sync", "No skin settings to sync", xbmcgui.NOTIFICATION_WARNING)
             return False
 
-        self.log(f"Syncing {skin_name} to {target_ip}")
+        self.log(f"Syncing {skin_name} to {target_ip} (options: {sync_options})")
 
         # Paths for skin settings
         remote_skin_path = f"{self.KODI_ADDON_DATA}/{skin_name}"
@@ -641,51 +722,72 @@ class SkinSync:
             time.sleep(2)
 
             # Ensure target directories exist
+            mkdir_cmd = f"mkdir -p {remote_skin_path}"
+            if "widgets" in sync_options:
+                mkdir_cmd += f" {self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}"
+            if "keymaps" in sync_options:
+                mkdir_cmd += f" {self.KEYMAPS_PATH}"
+
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}",
-                 f"mkdir -p {remote_skin_path} {self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}"],
+                 f"{self.username}@{target_ip}", mkdir_cmd],
                 capture_output=True,
                 timeout=10
             )
 
             # Sync skin settings
-            self.log(f"Copying skin settings to {target_ip}")
-            result = subprocess.run(
-                ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{skin_path}/.", f"{self.username}@{target_ip}:{remote_skin_path}/"],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-
-            if result.returncode != 0:
-                self.log(f"SCP skin settings failed: {result.stderr}", xbmc.LOGERROR)
-
-            # Sync skinvariables nodes (widget configurations) if they exist
-            if os.path.exists(skinvariables_nodes_path):
-                self.log(f"Copying widget configurations to {target_ip}")
+            if "settings" in sync_options:
+                self.log(f"Copying skin settings to {target_ip}")
                 result = subprocess.run(
                     ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{skinvariables_nodes_path}/.",
-                     f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/"],
+                     f"{skin_path}/.", f"{self.username}@{target_ip}:{remote_skin_path}/"],
                     capture_output=True,
                     text=True,
                     timeout=60
                 )
                 if result.returncode != 0:
-                    self.log(f"SCP widget configs failed: {result.stderr}", xbmc.LOGERROR)
+                    self.log(f"SCP skin settings failed: {result.stderr}", xbmc.LOGERROR)
 
-            # Sync viewtypes.json if it exists
-            if os.path.exists(skinvariables_viewtypes):
-                self.log(f"Copying viewtypes to {target_ip}")
-                subprocess.run(
-                    ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     skinvariables_viewtypes,
-                     f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/"],
-                    capture_output=True,
-                    timeout=30
-                )
+            # Sync skinvariables nodes (widget configurations) if they exist
+            if "widgets" in sync_options:
+                if os.path.exists(skinvariables_nodes_path):
+                    self.log(f"Copying widget configurations to {target_ip}")
+                    result = subprocess.run(
+                        ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                         f"{skinvariables_nodes_path}/.",
+                         f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/"],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode != 0:
+                        self.log(f"SCP widget configs failed: {result.stderr}", xbmc.LOGERROR)
+
+                # Sync viewtypes.json if it exists
+                if os.path.exists(skinvariables_viewtypes):
+                    self.log(f"Copying viewtypes to {target_ip}")
+                    subprocess.run(
+                        ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                         skinvariables_viewtypes,
+                         f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/"],
+                        capture_output=True,
+                        timeout=30
+                    )
+
+            # Sync keymaps
+            if "keymaps" in sync_options:
+                if os.path.exists(self.KEYMAPS_PATH) and os.listdir(self.KEYMAPS_PATH):
+                    self.log(f"Copying keymaps to {target_ip}")
+                    result = subprocess.run(
+                        ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                         f"{self.KEYMAPS_PATH}/.",
+                         f"{self.username}@{target_ip}:{self.KEYMAPS_PATH}/"],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode != 0:
+                        self.log(f"SCP keymaps failed: {result.stderr}", xbmc.LOGERROR)
 
             # Start Kodi on target
             self.log(f"Starting Kodi on {target_ip}")
@@ -704,6 +806,136 @@ class SkinSync:
         except Exception as e:
             self.log(f"Sync error: {e}", xbmc.LOGERROR)
             return False
+
+    def pull_from_device(self, source_ip, sync_options=None, do_backup=True):
+        """Pull skin settings FROM another device to this one."""
+        if sync_options is None:
+            sync_options = ["settings", "widgets"]
+
+        skin_name = self.get_current_skin()
+        self.log(f"Pulling {skin_name} from {source_ip} (options: {sync_options})")
+
+        # Create backup before pulling
+        if do_backup:
+            self.log("Creating backup before pull...")
+            self.create_backup()
+
+        # Paths
+        skin_path = self.get_skin_path()
+        skinvariables_path = os.path.join(self.KODI_ADDON_DATA, "script.skinvariables")
+        skinvariables_nodes_path = os.path.join(skinvariables_path, "nodes", skin_name)
+
+        try:
+            # Ensure local directories exist
+            os.makedirs(skin_path, exist_ok=True)
+            os.makedirs(skinvariables_nodes_path, exist_ok=True)
+            os.makedirs(self.KEYMAPS_PATH, exist_ok=True)
+
+            # Pull skin settings
+            if "settings" in sync_options:
+                self.log(f"Pulling skin settings from {source_ip}")
+                result = subprocess.run(
+                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                     f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/{skin_name}/.",
+                     f"{skin_path}/"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if result.returncode != 0:
+                    self.log(f"SCP skin settings failed: {result.stderr}", xbmc.LOGERROR)
+
+            # Pull widget configurations
+            if "widgets" in sync_options:
+                self.log(f"Pulling widget configurations from {source_ip}")
+                result = subprocess.run(
+                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                     f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/.",
+                     f"{skinvariables_nodes_path}/"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if result.returncode != 0:
+                    self.log(f"SCP widget configs failed: {result.stderr}", xbmc.LOGERROR)
+
+                # Pull viewtypes.json
+                viewtypes_file = f"{skin_name}-viewtypes.json"
+                subprocess.run(
+                    ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                     f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/{viewtypes_file}",
+                     f"{skinvariables_path}/"],
+                    capture_output=True,
+                    timeout=30
+                )
+
+            # Pull keymaps
+            if "keymaps" in sync_options:
+                self.log(f"Pulling keymaps from {source_ip}")
+                result = subprocess.run(
+                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                     f"{self.username}@{source_ip}:{self.KEYMAPS_PATH}/.",
+                     f"{self.KEYMAPS_PATH}/"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if result.returncode != 0:
+                    self.log(f"SCP keymaps failed: {result.stderr}", xbmc.LOGERROR)
+
+            return True
+
+        except subprocess.TimeoutExpired:
+            self.log("Pull timed out", xbmc.LOGERROR)
+            return False
+        except Exception as e:
+            self.log(f"Pull error: {e}", xbmc.LOGERROR)
+            return False
+
+    def sync_to_all_devices(self, sync_options=None, do_backup=True):
+        """Sync to all paired devices."""
+        devices = self.load_paired_devices()
+        if not devices:
+            self.dialog.ok("Skin Sync", "No paired devices found.")
+            return False
+
+        # Verify which devices are reachable
+        reachable = []
+        for d in devices:
+            ip = d.get('ip')
+            if self.keys_exist() and self.is_coreelec(ip):
+                reachable.append(d)
+
+        if not reachable:
+            self.dialog.ok("Skin Sync", "No paired devices are currently reachable.")
+            return False
+
+        # Confirm
+        device_names = [d.get('ip') for d in reachable]
+        if not self.dialog.yesno(
+            "Sync to All Devices",
+            f"Push settings to {len(reachable)} device(s)?\n\n" +
+            "\n".join(device_names) +
+            "\n\nKodi will restart on each device."
+        ):
+            return False
+
+        # Sync to each device
+        success_count = 0
+        for d in reachable:
+            ip = d.get('ip')
+            self.log(f"Syncing to {ip}...")
+            if self.sync_skin_to_device(ip, sync_options, do_backup=False):
+                success_count += 1
+            else:
+                self.log(f"Failed to sync to {ip}", xbmc.LOGERROR)
+
+        self.dialog.notification(
+            "Skin Sync",
+            f"Synced to {success_count}/{len(reachable)} devices",
+            xbmcgui.NOTIFICATION_INFO
+        )
+        return success_count > 0
     
     def run_setup(self):
         """Run first-time setup wizard."""
@@ -794,19 +1026,56 @@ class SkinSync:
         if not self.keys_exist():
             if not self.run_setup():
                 return
-        
+
+        # Show main menu
+        skin_name = self.get_current_skin()
+        menu_options = [
+            f"Push to device...",
+            f"Push to ALL paired devices",
+            f"Pull from device...",
+            "Create backup",
+            "Settings"
+        ]
+
+        choice = self.dialog.select(f"Skin Sync - {skin_name}", menu_options)
+
+        if choice < 0:
+            return
+
+        if choice == 0:
+            # Push to device
+            self.run_push_to_device()
+        elif choice == 1:
+            # Push to all devices
+            self.run_push_to_all()
+        elif choice == 2:
+            # Pull from device
+            self.run_pull_from_device()
+        elif choice == 3:
+            # Create backup
+            self.run_create_backup()
+        elif choice == 4:
+            # Settings submenu
+            self.run_settings_menu()
+
+    def run_push_to_device(self):
+        """Push settings to a single device."""
+        # Get sync options
+        sync_options = self.get_sync_options()
+        if sync_options is None:
+            return
+
         # Scan for devices
         progress = xbmcgui.DialogProgress()
         progress.create("Skin Sync", "Scanning for devices...")
-        
+
         def update_progress(pct, msg):
             progress.update(pct, msg)
-        
+
         devices = self.scan_network(progress_callback=update_progress)
         progress.close()
-        
+
         if not devices:
-            # Offer manual entry or setup
             choice = self.dialog.select(
                 "No Devices Found",
                 ["Add device manually by IP", "Run setup again", "Cancel"]
@@ -824,7 +1093,7 @@ class SkinSync:
         if not devices:
             return
 
-        # Show device selection with option to add more
+        # Show device selection
         skin_name = self.get_current_skin()
         device_list = []
         for d in devices:
@@ -834,15 +1103,11 @@ class SkinSync:
                 device_list.append(d['ip'])
         device_list.append("+ Add device manually...")
 
-        selected = self.dialog.select(
-            f"Push '{skin_name}' to:",
-            device_list
-        )
+        selected = self.dialog.select(f"Push '{skin_name}' to:", device_list)
 
         if selected < 0:
             return
 
-        # Handle "Add device manually" option
         if selected == len(devices):
             device = self.manual_add_device()
             if device:
@@ -852,24 +1117,202 @@ class SkinSync:
                 return
         else:
             target = devices[selected]
-        
+
         # Confirm
+        sync_items = ", ".join(sync_options)
         if not self.dialog.yesno(
             "Confirm Sync",
-            f"Push skin settings to {target['ip']}?\n\n"
+            f"Push to {target['ip']}?\n\n"
+            f"Syncing: {sync_items}\n\n"
             "Kodi will restart on the target device."
         ):
             return
-        
+
         # Do the sync
         progress = xbmcgui.DialogProgress()
         progress.create("Skin Sync", f"Syncing to {target['ip']}...")
-        
-        success = self.sync_skin_to_device(target['ip'])
-        
+
+        success = self.sync_skin_to_device(target['ip'], sync_options)
+
         progress.close()
-        
+
         if success:
             self.dialog.notification("Skin Sync", "Sync complete!", xbmcgui.NOTIFICATION_INFO)
         else:
             self.dialog.ok("Skin Sync", "Sync failed. Check the log for details.")
+
+    def run_push_to_all(self):
+        """Push settings to all paired devices."""
+        # Get sync options
+        sync_options = self.get_sync_options()
+        if sync_options is None:
+            return
+
+        # Check for paired devices
+        progress = xbmcgui.DialogProgress()
+        progress.create("Skin Sync", "Checking paired devices...")
+
+        devices = self.load_paired_devices()
+        if not devices:
+            progress.close()
+            self.dialog.ok("Skin Sync", "No paired devices. Add devices first using 'Push to device'.")
+            return
+
+        # Check which are reachable
+        reachable = []
+        for i, d in enumerate(devices):
+            progress.update(int((i + 1) / len(devices) * 100), f"Checking {d.get('ip')}...")
+            ip = d.get('ip')
+            if self.keys_exist() and self.is_coreelec(ip):
+                reachable.append(d)
+
+        progress.close()
+
+        if not reachable:
+            self.dialog.ok("Skin Sync", "No paired devices are currently reachable.")
+            return
+
+        # Confirm
+        sync_items = ", ".join(sync_options)
+        device_list = "\n".join([d.get('ip') for d in reachable])
+        if not self.dialog.yesno(
+            "Push to All Devices",
+            f"Push to {len(reachable)} device(s)?\n\n"
+            f"{device_list}\n\n"
+            f"Syncing: {sync_items}\n\n"
+            "Kodi will restart on each device."
+        ):
+            return
+
+        # Sync to each device
+        progress = xbmcgui.DialogProgress()
+        success_count = 0
+
+        for i, d in enumerate(reachable):
+            ip = d.get('ip')
+            progress.create("Skin Sync", f"Syncing to {ip} ({i+1}/{len(reachable)})...")
+            if self.sync_skin_to_device(ip, sync_options, do_backup=False):
+                success_count += 1
+            progress.close()
+
+        self.dialog.notification(
+            "Skin Sync",
+            f"Synced to {success_count}/{len(reachable)} devices",
+            xbmcgui.NOTIFICATION_INFO
+        )
+
+    def run_pull_from_device(self):
+        """Pull settings from another device."""
+        # Get sync options
+        sync_options = self.get_sync_options()
+        if sync_options is None:
+            return
+
+        # Scan for devices
+        progress = xbmcgui.DialogProgress()
+        progress.create("Skin Sync", "Scanning for devices...")
+
+        def update_progress(pct, msg):
+            progress.update(pct, msg)
+
+        devices = self.scan_network(progress_callback=update_progress)
+        progress.close()
+
+        if not devices:
+            choice = self.dialog.select(
+                "No Devices Found",
+                ["Add device manually by IP", "Cancel"]
+            )
+            if choice == 0:
+                device = self.manual_add_device()
+                if device:
+                    devices.append(device)
+            else:
+                return
+
+        if not devices:
+            return
+
+        # Show device selection
+        skin_name = self.get_current_skin()
+        device_list = []
+        for d in devices:
+            if d.get('hostname') and d['hostname'] != d['ip']:
+                device_list.append(f"{d['hostname']} ({d['ip']})")
+            else:
+                device_list.append(d['ip'])
+
+        selected = self.dialog.select(f"Pull '{skin_name}' from:", device_list)
+
+        if selected < 0:
+            return
+
+        source = devices[selected]
+
+        # Confirm
+        sync_items = ", ".join(sync_options)
+        if not self.dialog.yesno(
+            "Confirm Pull",
+            f"Pull from {source['ip']}?\n\n"
+            f"Syncing: {sync_items}\n\n"
+            "This will overwrite your current settings.\n"
+            "A backup will be created first."
+        ):
+            return
+
+        # Create backup and pull
+        progress = xbmcgui.DialogProgress()
+        progress.create("Skin Sync", "Creating backup...")
+
+        backup_path = self.create_backup()
+
+        progress.update(30, f"Pulling from {source['ip']}...")
+
+        success = self.pull_from_device(source['ip'], sync_options, do_backup=False)
+
+        progress.close()
+
+        if success:
+            # Prompt to reload skin
+            if self.dialog.yesno(
+                "Pull Complete",
+                "Settings pulled successfully.\n\n"
+                "Reload skin now to apply changes?"
+            ):
+                xbmc.executebuiltin("ReloadSkin()")
+        else:
+            self.dialog.ok("Skin Sync", "Pull failed. Check the log for details.")
+
+    def run_create_backup(self):
+        """Create a manual backup."""
+        progress = xbmcgui.DialogProgress()
+        progress.create("Skin Sync", "Creating backup...")
+
+        backup_path = self.create_backup()
+
+        progress.close()
+
+        if backup_path:
+            self.dialog.ok("Backup Created", f"Backup saved to:\n\n{backup_path}")
+        else:
+            self.dialog.ok("Backup Failed", "Failed to create backup. Check the log for details.")
+
+    def run_settings_menu(self):
+        """Show settings submenu."""
+        options = [
+            "View paired devices",
+            "Remove paired device",
+            "Reset SSH keys",
+            "Run setup again"
+        ]
+
+        choice = self.dialog.select("Settings", options)
+
+        if choice == 0:
+            self.view_paired_devices()
+        elif choice == 1:
+            self.remove_paired_device_dialog()
+        elif choice == 2:
+            self.reset_keys()
+        elif choice == 3:
+            self.run_setup()
