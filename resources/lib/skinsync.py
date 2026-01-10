@@ -129,79 +129,67 @@ class SkinSync:
             return False
     
     def run_ssh_with_password(self, ip, password, remote_cmd, timeout=15):
-        """Run SSH command with password authentication using script command for proper TTY."""
-        import pty
-        import select
+        """Run SSH command with password authentication using SSH_ASKPASS."""
+        import tempfile
+        import stat
 
         self.log(f"Running SSH to {ip}: {remote_cmd[:50]}...")
 
-        # Use script command to create a proper TTY environment
-        ssh_cmd = f"ssh -tt -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no {self.username}@{ip} '{remote_cmd}'"
+        # Create a temporary script that outputs the password
+        askpass_script = None
+        try:
+            # Create askpass script
+            askpass_script = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
+            askpass_script.write(f'#!/bin/sh\necho "{password}"\n')
+            askpass_script.close()
+            os.chmod(askpass_script.name, stat.S_IRWXU)
 
-        master, slave = pty.openpty()
+            env = os.environ.copy()
+            env['SSH_ASKPASS'] = askpass_script.name
+            env['SSH_ASKPASS_REQUIRE'] = 'force'
+            env['DISPLAY'] = ':0'
 
-        env = os.environ.copy()
-        env['TERM'] = 'vt100'
+            cmd = [
+                'setsid', 'ssh',
+                '-o', 'ConnectTimeout=5',
+                '-o', 'StrictHostKeyChecking=no',
+                '-o', 'UserKnownHostsFile=/dev/null',
+                '-o', 'PreferredAuthentications=keyboard-interactive,password',
+                '-o', 'PubkeyAuthentication=no',
+                '-o', 'NumberOfPasswordPrompts=1',
+                f'{self.username}@{ip}',
+                remote_cmd
+            ]
 
-        process = subprocess.Popen(
-            ['script', '-q', '-c', ssh_cmd, '/dev/null'],
-            stdin=master,
-            stdout=slave,
-            stderr=slave,
-            close_fds=True,
-            env=env
-        )
+            self.log(f"Running command: {' '.join(cmd[:5])}...")
 
-        os.close(slave)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+                stdin=subprocess.DEVNULL
+            )
 
-        output = b""
-        password_sent = False
-        start_time = time.time()
+            output = result.stdout + result.stderr
+            self.log(f"SSH output from {ip}: {output}")
+            self.log(f"SSH return code: {result.returncode}")
 
-        while time.time() - start_time < timeout:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
+            return output, True
+
+        except subprocess.TimeoutExpired:
+            self.log(f"SSH to {ip} timed out")
+            return b"", False
+        except Exception as e:
+            self.log(f"SSH error: {e}")
+            return b"", False
+        finally:
+            # Clean up askpass script
+            if askpass_script:
                 try:
-                    data = os.read(master, 4096)
-                    if not data:
-                        break
-                    output += data
-                    self.log(f"SSH output from {ip}: {data}")
-
-                    output_lower = output.lower()
-                    if not password_sent and b"password" in output_lower:
-                        time.sleep(0.1)
-                        os.write(master, (password + "\n").encode())
-                        password_sent = True
-                        self.log(f"Password sent to {ip}")
-
-                except OSError as e:
-                    self.log(f"OSError: {e}")
-                    break
-
-            if process.poll() is not None:
-                # Read remaining output
-                try:
-                    while True:
-                        ready, _, _ = select.select([master], [], [], 0.1)
-                        if not ready:
-                            break
-                        data = os.read(master, 4096)
-                        if not data:
-                            break
-                        output += data
+                    os.unlink(askpass_script.name)
                 except:
                     pass
-                break
-
-        try:
-            process.terminate()
-            os.close(master)
-        except:
-            pass
-
-        self.log(f"Final output from {ip}: {output}")
-        return output, password_sent
 
     def is_coreelec_with_password(self, ip, password):
         """Check if device is CoreELEC using password auth."""
