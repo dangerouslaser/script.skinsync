@@ -253,13 +253,91 @@ class SkinSync:
             self.log(f"Error copying key to {ip}: {e}", xbmc.LOGERROR)
             return False
     
+    def manual_add_device(self, password=None):
+        """Manually add a device by IP address."""
+        ip = self.dialog.input("Enter Device IP Address", type=xbmcgui.INPUT_ALPHANUM)
+
+        if not ip:
+            return None
+
+        # Validate IP format
+        parts = ip.split('.')
+        if len(parts) != 4:
+            self.dialog.notification("Skin Sync", "Invalid IP address", xbmcgui.NOTIFICATION_ERROR)
+            return None
+
+        try:
+            for part in parts:
+                if not 0 <= int(part) <= 255:
+                    raise ValueError()
+        except ValueError:
+            self.dialog.notification("Skin Sync", "Invalid IP address", xbmcgui.NOTIFICATION_ERROR)
+            return None
+
+        # Check if SSH port is open
+        progress = xbmcgui.DialogProgress()
+        progress.create("Skin Sync", f"Checking {ip}...")
+
+        if not self.check_port(ip, 22, timeout=2):
+            progress.close()
+            self.dialog.ok("Skin Sync", f"Cannot connect to {ip}\n\nMake sure:\n- The device is powered on\n- SSH is enabled\n- The IP address is correct")
+            return None
+
+        progress.update(50, f"Verifying CoreELEC on {ip}...")
+
+        # Check if it's CoreELEC
+        is_coreelec = False
+        key_installed = False
+
+        # Try with key first
+        if self.keys_exist() and self.is_coreelec(ip):
+            is_coreelec = True
+            key_installed = True
+        elif password and self.is_coreelec_with_password(ip, password):
+            is_coreelec = True
+            key_installed = False
+        else:
+            # Try with password prompt if no password provided
+            if not password:
+                progress.close()
+                password = self.dialog.input(
+                    f"Enter SSH password for {ip}",
+                    type=xbmcgui.INPUT_ALPHANUM,
+                    option=xbmcgui.ALPHANUM_HIDE_INPUT
+                )
+                if password:
+                    progress.create("Skin Sync", f"Verifying CoreELEC on {ip}...")
+                    if self.is_coreelec_with_password(ip, password):
+                        is_coreelec = True
+                        key_installed = False
+
+        progress.close()
+
+        if not is_coreelec:
+            self.dialog.ok("Skin Sync", f"Could not verify {ip} as a CoreELEC device.\n\nMake sure the password is correct.")
+            return None
+
+        device = {"ip": ip, "key_installed": key_installed}
+
+        # Copy key if needed
+        if not key_installed and password:
+            if self.copy_key_to_device(ip, password):
+                device["key_installed"] = True
+                self.dialog.notification("Skin Sync", f"Added {ip}", xbmcgui.NOTIFICATION_INFO)
+            else:
+                self.dialog.notification("Skin Sync", f"Added {ip} (key copy failed)", xbmcgui.NOTIFICATION_WARNING)
+        else:
+            self.dialog.notification("Skin Sync", f"Added {ip}", xbmcgui.NOTIFICATION_INFO)
+
+        return device
+
     def scan_network(self, password=None, progress_callback=None):
         """Scan network for CoreELEC devices."""
         prefix = self.get_network_prefix()
         if not prefix:
             self.log("Could not determine network prefix", xbmc.LOGERROR)
             return []
-        
+
         local_ip = self.get_local_ip()
         self.log(f"Scanning network {prefix}.0/24 (local: {local_ip})")
         
@@ -391,14 +469,26 @@ class SkinSync:
             progress.update(10 + int(pct * 0.8), msg)
         
         devices = self.scan_network(password=password, progress_callback=update_progress)
-        
+        progress.close()
+
         if not devices:
-            progress.close()
-            self.dialog.ok("Skin Sync", "No other CoreELEC devices found on the network")
+            # Offer manual entry
+            if self.dialog.yesno(
+                "No Devices Found",
+                "No CoreELEC devices were found automatically.\n\n"
+                "Would you like to add a device manually by IP address?"
+            ):
+                device = self.manual_add_device(password)
+                if device:
+                    devices.append(device)
+
+        if not devices:
+            self.dialog.ok("Skin Sync", "No devices configured. Setup incomplete.")
             return False
-        
-        # Copy keys to devices
-        progress.update(90, "Installing SSH keys on devices...")
+
+        # Copy keys to devices that don't have them yet
+        progress = xbmcgui.DialogProgress()
+        progress.create("Skin Sync Setup", "Installing SSH keys on devices...")
         
         success_count = 0
         for device in devices:
@@ -444,28 +534,47 @@ class SkinSync:
         progress.close()
         
         if not devices:
-            # Maybe keys aren't set up on some devices, offer setup again
-            if self.dialog.yesno(
+            # Offer manual entry or setup
+            choice = self.dialog.select(
                 "No Devices Found",
-                "No CoreELEC devices found with SSH access.\n\n"
-                "Would you like to run setup again?"
-            ):
+                ["Add device manually by IP", "Run setup again", "Cancel"]
+            )
+            if choice == 0:
+                device = self.manual_add_device()
+                if device:
+                    devices.append(device)
+            elif choice == 1:
                 self.run_setup()
+                return
+            else:
+                return
+
+        if not devices:
             return
-        
-        # Show device selection
+
+        # Show device selection with option to add more
         skin_name = self.get_current_skin()
         device_list = [f"{d['ip']}" for d in devices]
-        
+        device_list.append("+ Add device manually...")
+
         selected = self.dialog.select(
             f"Push '{skin_name}' to:",
             device_list
         )
-        
+
         if selected < 0:
             return
-        
-        target = devices[selected]
+
+        # Handle "Add device manually" option
+        if selected == len(devices):
+            device = self.manual_add_device()
+            if device:
+                devices.append(device)
+                target = device
+            else:
+                return
+        else:
+            target = devices[selected]
         
         # Confirm
         if not self.dialog.yesno(
