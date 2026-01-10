@@ -131,58 +131,85 @@ class SkinSync:
     def is_coreelec_with_password(self, ip, password):
         """Check if device is CoreELEC using password auth."""
         try:
-            # Use Python's pty to handle password prompt
             import pty
             import select
-            
-            cmd = f"ssh -o ConnectTimeout=3 -o StrictHostKeyChecking=no {self.username}@{ip} 'test -d /storage/.kodi && echo COREELEC_OK'"
-            
+
+            cmd = [
+                "ssh",
+                "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "PreferredAuthentications=password",
+                "-o", "PubkeyAuthentication=no",
+                f"{self.username}@{ip}",
+                "test -d /storage/.kodi && echo COREELEC_OK"
+            ]
+
+            self.log(f"Checking {ip} with password auth...")
+
             master, slave = pty.openpty()
             process = subprocess.Popen(
                 cmd,
-                shell=True,
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
                 close_fds=True
             )
             os.close(slave)
-            
+
             output = b""
             password_sent = False
             start_time = time.time()
-            
-            while time.time() - start_time < 10:
-                if select.select([master], [], [], 0.1)[0]:
+
+            while time.time() - start_time < 15:
+                ready, _, _ = select.select([master], [], [], 0.5)
+                if ready:
                     try:
-                        data = os.read(master, 1024)
+                        data = os.read(master, 4096)
                         if not data:
                             break
                         output += data
-                        
-                        if b"password:" in output.lower() and not password_sent:
+                        self.log(f"SSH output from {ip}: {data[:200]}")
+
+                        # Check for password prompt (various formats)
+                        output_lower = output.lower()
+                        if not password_sent and (b"password:" in output_lower or b"password for" in output_lower):
+                            time.sleep(0.1)  # Small delay before sending password
                             os.write(master, (password + "\n").encode())
                             password_sent = True
-                        
+                            self.log(f"Password sent to {ip}")
+
                         if b"COREELEC_OK" in output:
-                            process.terminate()
-                            os.close(master)
+                            self.log(f"CoreELEC verified on {ip}")
+                            try:
+                                process.terminate()
+                                os.close(master)
+                            except:
+                                pass
                             return True
-                            
-                    except OSError:
+
+                        # Check for auth failure
+                        if b"permission denied" in output_lower or b"authentication failed" in output_lower:
+                            self.log(f"Auth failed on {ip}")
+                            break
+
+                    except OSError as e:
+                        self.log(f"OSError reading from {ip}: {e}")
                         break
-                
+
                 if process.poll() is not None:
                     break
-            
+
+            self.log(f"Final output from {ip}: {output[-500:] if len(output) > 500 else output}")
+
             try:
                 process.terminate()
                 os.close(master)
             except:
                 pass
-            
+
             return False
-            
+
         except Exception as e:
             self.log(f"Error checking {ip}: {e}", xbmc.LOGERROR)
             return False
@@ -190,65 +217,91 @@ class SkinSync:
     def copy_key_to_device(self, ip, password):
         """Copy SSH public key to a remote device."""
         self.log(f"Copying SSH key to {ip}...")
-        
+
         public_key = self.get_public_key()
         if not public_key:
             return False
-        
+
         try:
             import pty
             import select
-            
+
             # Command to append key to authorized_keys
-            cmd = f"ssh -o StrictHostKeyChecking=no {self.username}@{ip} 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo \"{public_key}\" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sort -u -o ~/.ssh/authorized_keys ~/.ssh/authorized_keys'"
-            
+            remote_cmd = f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{public_key}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sort -u -o ~/.ssh/authorized_keys ~/.ssh/authorized_keys && echo KEY_COPIED_OK"
+
+            cmd = [
+                "ssh",
+                "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "PreferredAuthentications=password",
+                "-o", "PubkeyAuthentication=no",
+                f"{self.username}@{ip}",
+                remote_cmd
+            ]
+
             master, slave = pty.openpty()
             process = subprocess.Popen(
                 cmd,
-                shell=True,
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
                 close_fds=True
             )
             os.close(slave)
-            
+
             output = b""
             password_sent = False
             start_time = time.time()
-            
+
             while time.time() - start_time < 30:
-                if select.select([master], [], [], 0.1)[0]:
+                ready, _, _ = select.select([master], [], [], 0.5)
+                if ready:
                     try:
-                        data = os.read(master, 1024)
+                        data = os.read(master, 4096)
                         if not data:
                             break
                         output += data
-                        
-                        if b"password:" in output.lower() and not password_sent:
+                        self.log(f"Key copy output from {ip}: {data[:200]}")
+
+                        output_lower = output.lower()
+                        if not password_sent and (b"password:" in output_lower or b"password for" in output_lower):
+                            time.sleep(0.1)
                             os.write(master, (password + "\n").encode())
                             password_sent = True
-                            
-                    except OSError:
+                            self.log(f"Password sent for key copy to {ip}")
+
+                        if b"KEY_COPIED_OK" in output:
+                            self.log(f"Successfully copied key to {ip}")
+                            try:
+                                process.terminate()
+                                os.close(master)
+                            except:
+                                pass
+                            return True
+
+                        if b"permission denied" in output_lower or b"authentication failed" in output_lower:
+                            self.log(f"Auth failed copying key to {ip}")
+                            break
+
+                    except OSError as e:
+                        self.log(f"OSError copying key to {ip}: {e}")
                         break
-                
+
                 if process.poll() is not None:
                     break
-            
+
+            self.log(f"Key copy final output from {ip}: {output[-500:] if len(output) > 500 else output}")
+
             try:
-                process.wait(timeout=5)
+                process.terminate()
                 os.close(master)
             except:
-                process.terminate()
-            
-            success = process.returncode == 0
-            if success:
-                self.log(f"Successfully copied key to {ip}")
-            else:
-                self.log(f"Failed to copy key to {ip}", xbmc.LOGERROR)
-            
-            return success
-            
+                pass
+
+            self.log(f"Failed to copy key to {ip}", xbmc.LOGERROR)
+            return False
+
         except Exception as e:
             self.log(f"Error copying key to {ip}: {e}", xbmc.LOGERROR)
             return False
