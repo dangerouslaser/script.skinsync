@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="script.skinsync" name="Skin Sync" version="1.0.0" provider-name="Bryan">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.python.script" library="default.py">
+        <provides>executable</provides>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+        <summary lang="en_GB">Sync skin settings between Kodi devices</summary>
+        <description lang="en_GB">Push your current skin configuration to other CoreELEC devices on your network. Automatically discovers devices and handles SSH key setup.</description>
+        <platform>all</platform>
+        <license>MIT</license>
+    </extension>
+</addon>
