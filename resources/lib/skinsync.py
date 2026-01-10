@@ -198,6 +198,84 @@ class SkinSync:
             return result == 0
         except:
             return False
+
+    def discover_via_avahi(self):
+        """Discover CoreELEC devices using Avahi/mDNS (Zeroconf)."""
+        self.log("Discovering devices via Avahi/mDNS...")
+        devices = []
+
+        try:
+            # Use avahi-browse to find SSH services
+            # -t = terminate after getting results
+            # -r = resolve (get IP addresses)
+            # -p = parseable output
+            result = subprocess.run(
+                ['avahi-browse', '-t', '-r', '-p', '_ssh._tcp'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                self.log(f"avahi-browse failed: {result.stderr}")
+                return None  # Return None to indicate fallback needed
+
+            local_ip = self.get_local_ip()
+            seen_ips = set()
+
+            # Parse output - format is:
+            # =;interface;protocol;name;type;domain;hostname;address;port;txt
+            for line in result.stdout.strip().split('\n'):
+                if not line or not line.startswith('='):
+                    continue
+
+                parts = line.split(';')
+                if len(parts) >= 8:
+                    hostname = parts[6]  # e.g., "CoreELEC.local"
+                    ip = parts[7]
+
+                    # Skip our own device and duplicates
+                    if ip == local_ip or ip in seen_ips:
+                        continue
+
+                    # Skip IPv6 addresses
+                    if ':' in ip:
+                        continue
+
+                    seen_ips.add(ip)
+
+                    # Check if it looks like a CoreELEC device by hostname
+                    is_coreelec_host = 'coreelec' in hostname.lower()
+
+                    if is_coreelec_host:
+                        self.log(f"Found CoreELEC device via Avahi: {hostname} ({ip})")
+                        devices.append({
+                            'ip': ip,
+                            'hostname': hostname.replace('.local', ''),
+                            'discovered_via': 'avahi'
+                        })
+                    else:
+                        # Not obviously CoreELEC, but has SSH - we'll verify later
+                        self.log(f"Found SSH device via Avahi: {hostname} ({ip})")
+                        devices.append({
+                            'ip': ip,
+                            'hostname': hostname.replace('.local', ''),
+                            'discovered_via': 'avahi',
+                            'needs_verification': True
+                        })
+
+            self.log(f"Avahi discovery found {len(devices)} SSH devices")
+            return devices
+
+        except FileNotFoundError:
+            self.log("avahi-browse not available")
+            return None
+        except subprocess.TimeoutExpired:
+            self.log("avahi-browse timed out")
+            return None
+        except Exception as e:
+            self.log(f"Avahi discovery error: {e}", xbmc.LOGERROR)
+            return None
     
     def is_coreelec(self, ip):
         """Check if a device is a CoreELEC box by testing SSH."""
@@ -407,27 +485,27 @@ class SkinSync:
 
         return device
 
-    def scan_network(self, password=None, progress_callback=None):
-        """Scan network for CoreELEC devices."""
+    def scan_network_ip_fallback(self, password=None, progress_callback=None):
+        """Fallback: Scan network for CoreELEC devices by IP range."""
         prefix = self.get_network_prefix()
         if not prefix:
             self.log("Could not determine network prefix", xbmc.LOGERROR)
             return []
 
         local_ip = self.get_local_ip()
-        self.log(f"Scanning network {prefix}.0/24 (local: {local_ip})")
-        
+        self.log(f"IP scan fallback: Scanning {prefix}.0/24 (local: {local_ip})")
+
         devices = []
         ips_to_check = [f"{prefix}.{i}" for i in range(1, 255)]
-        
+
         # First pass: quick port scan
         open_ports = []
-        
+
         def check_ip(ip):
             if ip != local_ip and self.check_port(ip, 22):
                 return ip
             return None
-        
+
         with ThreadPoolExecutor(max_workers=50) as executor:
             futures = {executor.submit(check_ip, ip): ip for ip in ips_to_check}
             completed = 0
@@ -438,9 +516,9 @@ class SkinSync:
                 result = future.result()
                 if result:
                     open_ports.append(result)
-        
+
         self.log(f"Found {len(open_ports)} devices with SSH open")
-        
+
         # Second pass: check if they're CoreELEC
         for i, ip in enumerate(open_ports):
             if progress_callback:
@@ -449,23 +527,87 @@ class SkinSync:
             # Try without password first (if keys are set up)
             if self.keys_exist() and self.is_coreelec(ip):
                 devices.append({"ip": ip, "key_installed": True})
-                # Auto-add to paired devices if not already there
                 self.add_paired_device(ip)
             elif password and self.is_coreelec_with_password(ip, password):
                 devices.append({"ip": ip, "key_installed": False})
 
-        # Include paired devices that weren't found in scan (might be offline or on different subnet)
+        return devices
+
+    def scan_network(self, password=None, progress_callback=None):
+        """Scan network for CoreELEC devices using Avahi (with IP scan fallback)."""
+        devices = []
+        local_ip = self.get_local_ip()
+
+        # Try Avahi/mDNS discovery first (fast)
+        if progress_callback:
+            progress_callback(5, "Discovering devices via Avahi...")
+
+        avahi_devices = self.discover_via_avahi()
+
+        if avahi_devices is not None and len(avahi_devices) > 0:
+            # Avahi found devices - verify they're CoreELEC
+            self.log(f"Avahi found {len(avahi_devices)} devices, verifying...")
+
+            for i, device in enumerate(avahi_devices):
+                ip = device['ip']
+                hostname = device.get('hostname', ip)
+
+                if progress_callback:
+                    progress_callback(10 + int((i + 1) / len(avahi_devices) * 40), f"Checking {hostname}...")
+
+                # Skip verification for devices with CoreELEC in hostname
+                if not device.get('needs_verification'):
+                    # Trust the hostname, just check if keys work
+                    if self.keys_exist() and self.is_coreelec(ip):
+                        devices.append({"ip": ip, "hostname": hostname, "key_installed": True})
+                        self.add_paired_device(ip, hostname)
+                    elif password and self.is_coreelec_with_password(ip, password):
+                        devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
+                    else:
+                        # Can't verify but hostname says CoreELEC - add anyway
+                        devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
+                else:
+                    # Verify it's actually CoreELEC
+                    if self.keys_exist() and self.is_coreelec(ip):
+                        devices.append({"ip": ip, "hostname": hostname, "key_installed": True})
+                        self.add_paired_device(ip, hostname)
+                    elif password and self.is_coreelec_with_password(ip, password):
+                        devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
+
+        elif avahi_devices is None:
+            # Avahi not available or failed - fall back to IP scanning
+            self.log("Avahi not available, falling back to IP scan...")
+            if progress_callback:
+                progress_callback(10, "Avahi unavailable, scanning by IP...")
+            devices = self.scan_network_ip_fallback(password, progress_callback)
+
+        # Include paired devices that weren't found in scan
+        if progress_callback:
+            progress_callback(60, "Checking paired devices...")
+
         found_ips = {d['ip'] for d in devices}
         paired = self.load_paired_devices()
-        for pd in paired:
-            if pd.get('ip') not in found_ips:
+
+        for i, pd in enumerate(paired):
+            ip = pd.get('ip')
+            if ip not in found_ips:
+                if progress_callback:
+                    progress_callback(60 + int((i + 1) / max(len(paired), 1) * 30), f"Checking {ip}...")
+
                 # Check if this paired device is reachable
-                ip = pd.get('ip')
                 if self.keys_exist() and self.is_coreelec(ip):
-                    devices.append({"ip": ip, "key_installed": True, "paired": True})
+                    devices.append({
+                        "ip": ip,
+                        "hostname": pd.get('name', ip),
+                        "key_installed": True,
+                        "paired": True
+                    })
                     self.log(f"Added paired device {ip} from saved list")
 
-        self.log(f"Found {len(devices)} CoreELEC devices")
+        if progress_callback:
+            progress_callback(100, "Done")
+
+        self.log(f"Found {len(devices)} CoreELEC devices total")
         return devices
     
     def sync_skin_to_device(self, target_ip):
@@ -504,11 +646,12 @@ class SkinSync:
                 self.log(f"SCP failed: {result.stderr}", xbmc.LOGERROR)
                 return False
             
-            # Restart Kodi on target
+            # Restart Kodi on target (run in background so SSH returns immediately)
             self.log(f"Restarting Kodi on {target_ip}")
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}", "systemctl restart kodi"],
+                 f"{self.username}@{target_ip}",
+                 "nohup sh -c 'sleep 1 && systemctl restart kodi' >/dev/null 2>&1 &"],
                 capture_output=True,
                 timeout=10
             )
@@ -643,7 +786,12 @@ class SkinSync:
 
         # Show device selection with option to add more
         skin_name = self.get_current_skin()
-        device_list = [f"{d['ip']}" for d in devices]
+        device_list = []
+        for d in devices:
+            if d.get('hostname') and d['hostname'] != d['ip']:
+                device_list.append(f"{d['hostname']} ({d['ip']})")
+            else:
+                device_list.append(d['ip'])
         device_list.append("+ Add device manually...")
 
         selected = self.dialog.select(
