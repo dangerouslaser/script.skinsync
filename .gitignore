@@ -16,3 +16,9 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Local documentation (may contain sensitive info)
+CLAUDE.md
+
+# Test scripts (contain credentials)
+tests/
