@@ -133,27 +133,44 @@ class SkinSync:
         try:
             import pty
             import select
+            import termios
+            import tty
+
+            self.log(f"Checking {ip} with password auth...")
+
+            # Create PTY
+            master, slave = pty.openpty()
+
+            # Set raw mode on the slave to prevent buffering issues
+            try:
+                tty.setraw(slave)
+            except:
+                pass
 
             cmd = [
                 "ssh",
+                "-tt",  # Force pseudo-terminal allocation
                 "-o", "ConnectTimeout=5",
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "PreferredAuthentications=password",
                 "-o", "PubkeyAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=1",
                 f"{self.username}@{ip}",
                 "test -d /storage/.kodi && echo COREELEC_OK"
             ]
 
-            self.log(f"Checking {ip} with password auth...")
+            env = os.environ.copy()
+            env['TERM'] = 'xterm'
 
-            master, slave = pty.openpty()
             process = subprocess.Popen(
                 cmd,
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
-                close_fds=True
+                close_fds=True,
+                env=env,
+                preexec_fn=os.setsid
             )
             os.close(slave)
 
@@ -162,19 +179,19 @@ class SkinSync:
             start_time = time.time()
 
             while time.time() - start_time < 15:
-                ready, _, _ = select.select([master], [], [], 0.5)
+                ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
                     try:
                         data = os.read(master, 4096)
                         if not data:
                             break
                         output += data
-                        self.log(f"SSH output from {ip}: {data[:200]}")
+                        self.log(f"SSH output from {ip}: {data}")
 
                         # Check for password prompt (various formats)
                         output_lower = output.lower()
-                        if not password_sent and (b"password:" in output_lower or b"password for" in output_lower):
-                            time.sleep(0.1)  # Small delay before sending password
+                        if not password_sent and b"password" in output_lower:
+                            time.sleep(0.2)
                             os.write(master, (password + "\n").encode())
                             password_sent = True
                             self.log(f"Password sent to {ip}")
@@ -188,9 +205,9 @@ class SkinSync:
                                 pass
                             return True
 
-                        # Check for auth failure
-                        if b"permission denied" in output_lower or b"authentication failed" in output_lower:
-                            self.log(f"Auth failed on {ip}")
+                        # Check for auth failure (only after password was sent)
+                        if password_sent and b"permission denied" in output_lower:
+                            self.log(f"Auth failed on {ip} - wrong password?")
                             break
 
                     except OSError as e:
@@ -198,9 +215,19 @@ class SkinSync:
                         break
 
                 if process.poll() is not None:
+                    # Process ended, read any remaining output
+                    try:
+                        ready, _, _ = select.select([master], [], [], 0.1)
+                        if ready:
+                            data = os.read(master, 4096)
+                            if data:
+                                output += data
+                                self.log(f"SSH final read from {ip}: {data}")
+                    except:
+                        pass
                     break
 
-            self.log(f"Final output from {ip}: {output[-500:] if len(output) > 500 else output}")
+            self.log(f"Final output from {ip}: {output}")
 
             try:
                 process.terminate()
@@ -225,28 +252,44 @@ class SkinSync:
         try:
             import pty
             import select
+            import tty
+
+            # Create PTY
+            master, slave = pty.openpty()
+
+            # Set raw mode on the slave
+            try:
+                tty.setraw(slave)
+            except:
+                pass
 
             # Command to append key to authorized_keys
             remote_cmd = f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{public_key}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sort -u -o ~/.ssh/authorized_keys ~/.ssh/authorized_keys && echo KEY_COPIED_OK"
 
             cmd = [
                 "ssh",
+                "-tt",
                 "-o", "ConnectTimeout=5",
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "PreferredAuthentications=password",
                 "-o", "PubkeyAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=1",
                 f"{self.username}@{ip}",
                 remote_cmd
             ]
 
-            master, slave = pty.openpty()
+            env = os.environ.copy()
+            env['TERM'] = 'xterm'
+
             process = subprocess.Popen(
                 cmd,
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
-                close_fds=True
+                close_fds=True,
+                env=env,
+                preexec_fn=os.setsid
             )
             os.close(slave)
 
@@ -255,18 +298,18 @@ class SkinSync:
             start_time = time.time()
 
             while time.time() - start_time < 30:
-                ready, _, _ = select.select([master], [], [], 0.5)
+                ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
                     try:
                         data = os.read(master, 4096)
                         if not data:
                             break
                         output += data
-                        self.log(f"Key copy output from {ip}: {data[:200]}")
+                        self.log(f"Key copy output from {ip}: {data}")
 
                         output_lower = output.lower()
-                        if not password_sent and (b"password:" in output_lower or b"password for" in output_lower):
-                            time.sleep(0.1)
+                        if not password_sent and b"password" in output_lower:
+                            time.sleep(0.2)
                             os.write(master, (password + "\n").encode())
                             password_sent = True
                             self.log(f"Password sent for key copy to {ip}")
@@ -280,7 +323,7 @@ class SkinSync:
                                 pass
                             return True
 
-                        if b"permission denied" in output_lower or b"authentication failed" in output_lower:
+                        if password_sent and b"permission denied" in output_lower:
                             self.log(f"Auth failed copying key to {ip}")
                             break
 
@@ -289,9 +332,18 @@ class SkinSync:
                         break
 
                 if process.poll() is not None:
+                    try:
+                        ready, _, _ = select.select([master], [], [], 0.1)
+                        if ready:
+                            data = os.read(master, 4096)
+                            if data:
+                                output += data
+                                self.log(f"Key copy final read from {ip}: {data}")
+                    except:
+                        pass
                     break
 
-            self.log(f"Key copy final output from {ip}: {output[-500:] if len(output) > 500 else output}")
+            self.log(f"Key copy final output from {ip}: {output}")
 
             try:
                 process.terminate()
