@@ -150,7 +150,7 @@ class SkinSync:
             env['DISPLAY'] = ':0'
 
             cmd = [
-                'setsid', 'ssh',
+                'ssh',
                 '-o', 'ConnectTimeout=5',
                 '-o', 'StrictHostKeyChecking=no',
                 '-o', 'UserKnownHostsFile=/dev/null',
