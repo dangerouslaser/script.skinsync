@@ -614,50 +614,81 @@ class SkinSync:
         """Sync current skin settings to target device."""
         skin_path = self.get_skin_path()
         skin_name = self.get_current_skin()
-        
+
         if not os.path.exists(skin_path):
             self.dialog.notification("Skin Sync", "No skin settings to sync", xbmcgui.NOTIFICATION_WARNING)
             return False
-        
+
         self.log(f"Syncing {skin_name} to {target_ip}")
-        
-        # Create target directory
-        remote_path = f"{self.KODI_ADDON_DATA}/{skin_name}"
-        
+
+        # Paths for skin settings
+        remote_skin_path = f"{self.KODI_ADDON_DATA}/{skin_name}"
+
+        # Paths for skinvariables (widget configurations)
+        skinvariables_path = os.path.join(self.KODI_ADDON_DATA, "script.skinvariables")
+        skinvariables_nodes_path = os.path.join(skinvariables_path, "nodes", skin_name)
+        skinvariables_viewtypes = os.path.join(skinvariables_path, f"{skin_name}-viewtypes.json")
+
         try:
-            # Ensure target directory exists
+            # Ensure target directories exist
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}", f"mkdir -p {remote_path}"],
+                 f"{self.username}@{target_ip}",
+                 f"mkdir -p {remote_skin_path} {self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}"],
                 capture_output=True,
                 timeout=10
             )
-            
-            # Sync files using scp
+
+            # Sync skin settings
+            self.log(f"Copying skin settings to {target_ip}")
             result = subprocess.run(
                 ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{skin_path}/.", f"{self.username}@{target_ip}:{remote_path}/"],
+                 f"{skin_path}/.", f"{self.username}@{target_ip}:{remote_skin_path}/"],
                 capture_output=True,
                 text=True,
                 timeout=60
             )
-            
+
             if result.returncode != 0:
-                self.log(f"SCP failed: {result.stderr}", xbmc.LOGERROR)
-                return False
-            
-            # Restart Kodi on target (run in background so SSH returns immediately)
-            self.log(f"Restarting Kodi on {target_ip}")
+                self.log(f"SCP skin settings failed: {result.stderr}", xbmc.LOGERROR)
+
+            # Sync skinvariables nodes (widget configurations) if they exist
+            if os.path.exists(skinvariables_nodes_path):
+                self.log(f"Copying widget configurations to {target_ip}")
+                result = subprocess.run(
+                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                     f"{skinvariables_nodes_path}/.",
+                     f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if result.returncode != 0:
+                    self.log(f"SCP widget configs failed: {result.stderr}", xbmc.LOGERROR)
+
+            # Sync viewtypes.json if it exists
+            if os.path.exists(skinvariables_viewtypes):
+                self.log(f"Copying viewtypes to {target_ip}")
+                subprocess.run(
+                    ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                     skinvariables_viewtypes,
+                     f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/"],
+                    capture_output=True,
+                    timeout=30
+                )
+
+            # Reload skin on target (faster than restarting Kodi)
+            self.log(f"Reloading skin on {target_ip}")
             subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                  f"{self.username}@{target_ip}",
-                 "nohup sh -c 'sleep 1 && systemctl restart kodi' >/dev/null 2>&1 &"],
+                 "kodi-send --action='ReloadSkin()'"],
                 capture_output=True,
                 timeout=10
             )
-            
+
             return True
-            
+
         except subprocess.TimeoutExpired:
             self.log("Sync timed out", xbmc.LOGERROR)
             return False
