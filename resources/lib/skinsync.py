@@ -717,7 +717,7 @@ class SkinSync:
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                  f"{self.username}@{target_ip}", "systemctl stop kodi"],
                 capture_output=True,
-                timeout=15
+                timeout=60  # Kodi can take a while to stop, especially if busy
             )
             time.sleep(2)
 
