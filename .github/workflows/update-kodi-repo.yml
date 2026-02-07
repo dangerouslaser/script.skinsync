@@ -1,0 +1,16 @@
+name: Update Kodi Repository
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger repository update
+        run: |
+          gh api repos/dangerouslaser/dangerouslaser.github.io/dispatches \
+            -f event_type=addon-released
+        env:
+          GH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}
