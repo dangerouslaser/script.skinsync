@@ -12,6 +12,7 @@ import socket
 import os
 import time
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -22,8 +23,8 @@ class SkinSync:
     KEY_FILE = "/storage/.ssh/id_ed25519"
     KEY_FILE_PUB = "/storage/.ssh/id_ed25519.pub"
     KODI_ADDON_DATA = "/storage/.kodi/userdata/addon_data"
-    KODI_USERDATA = "/storage/.kodi/userdata"
     KEYMAPS_PATH = "/storage/.kodi/userdata/keymaps"
+    _SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
 
     def __init__(self, addon):
         self.addon = addon
@@ -33,7 +34,6 @@ class SkinSync:
         self.username = addon.getSetting('ssh_username') or 'root'
         self.network_prefix = addon.getSetting('network_prefix') or None
         self.dialog = xbmcgui.Dialog()
-        self.progress = None
 
         # Ensure addon data directory exists
         if not os.path.exists(self.addon_data_path):
@@ -79,13 +79,6 @@ class SkinSync:
         devices = self.load_paired_devices()
         devices = [d for d in devices if d.get('ip') != ip]
         self.save_paired_devices(devices)
-
-    def get_paired_devices_string(self):
-        """Get a formatted string of paired devices for settings display."""
-        devices = self.load_paired_devices()
-        if not devices:
-            return "No paired devices"
-        return ", ".join([d.get('ip', 'unknown') for d in devices])
 
     def view_paired_devices(self):
         """Show a dialog with all paired devices."""
@@ -133,15 +126,15 @@ class SkinSync:
     
     def get_local_ip(self):
         """Get this device's local IP address."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            return s.getsockname()[0]
         except Exception as e:
             self.log(f"Error getting local IP: {e}", xbmc.LOGERROR)
             return None
+        finally:
+            s.close()
     
     def get_network_prefix(self):
         """Get the network prefix (e.g., 192.168.1)."""
@@ -193,6 +186,20 @@ class SkinSync:
             self.log(f"Error reading public key: {e}", xbmc.LOGERROR)
             return None
     
+    def _run_ssh(self, ip, command, timeout=10):
+        """Run an SSH command with standard options. Returns subprocess result."""
+        return subprocess.run(
+            ["ssh"] + self._SSH_OPTS + [f"{self.username}@{ip}", command],
+            capture_output=True, timeout=timeout
+        )
+
+    def _run_scp(self, src, dest, timeout=60):
+        """Run an SCP command with standard options. Returns subprocess result."""
+        return subprocess.run(
+            ["scp", "-r"] + self._SSH_OPTS + [src, dest],
+            capture_output=True, text=True, timeout=timeout
+        )
+
     def check_port(self, ip, port=22, timeout=0.5):
         """Check if a port is open on an IP."""
         try:
@@ -201,7 +208,7 @@ class SkinSync:
             result = sock.connect_ex((ip, port))
             sock.close()
             return result == 0
-        except:
+        except Exception:
             return False
 
     def discover_via_avahi(self):
@@ -285,15 +292,9 @@ class SkinSync:
     def is_coreelec(self, ip):
         """Check if a device is a CoreELEC box by testing SSH."""
         try:
-            result = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", 
-                 "-o", "StrictHostKeyChecking=no",
-                 f"{self.username}@{ip}", "test -d /storage/.kodi"],
-                capture_output=True,
-                timeout=5
-            )
+            result = self._run_ssh(ip, "test -d /storage/.kodi", timeout=5)
             return result.returncode == 0
-        except:
+        except Exception:
             return False
     
     def run_ssh_with_password(self, ip, password, remote_cmd, timeout=15):
@@ -308,7 +309,8 @@ class SkinSync:
         try:
             # Create askpass script
             askpass_script = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
-            askpass_script.write(f'#!/bin/sh\necho "{password}"\n')
+            safe_password = password.replace("'", "'\\''")
+            askpass_script.write(f"#!/bin/sh\necho '{safe_password}'\n")
             askpass_script.close()
             os.chmod(askpass_script.name, stat.S_IRWXU)
 
@@ -356,7 +358,7 @@ class SkinSync:
             if askpass_script:
                 try:
                     os.unlink(askpass_script.name)
-                except:
+                except Exception:
                     pass
 
     def is_coreelec_with_password(self, ip, password):
@@ -549,7 +551,7 @@ class SkinSync:
 
         avahi_devices = self.discover_via_avahi()
 
-        if avahi_devices is not None and len(avahi_devices) > 0:
+        if avahi_devices:
             # Avahi found devices - verify they're CoreELEC
             self.log(f"Avahi found {len(avahi_devices)} devices, verifying...")
 
@@ -560,30 +562,24 @@ class SkinSync:
                 if progress_callback:
                     progress_callback(10 + int((i + 1) / len(avahi_devices) * 40), f"Checking {hostname}...")
 
-                # Skip verification for devices with CoreELEC in hostname
-                if not device.get('needs_verification'):
-                    # Trust the hostname, just check if keys work
-                    if self.keys_exist() and self.is_coreelec(ip):
-                        devices.append({"ip": ip, "hostname": hostname, "key_installed": True})
-                        self.add_paired_device(ip, hostname)
-                    elif password and self.is_coreelec_with_password(ip, password):
-                        devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
-                    else:
-                        # Can't verify but hostname says CoreELEC - add anyway
-                        devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
-                else:
-                    # Verify it's actually CoreELEC
-                    if self.keys_exist() and self.is_coreelec(ip):
-                        devices.append({"ip": ip, "hostname": hostname, "key_installed": True})
-                        self.add_paired_device(ip, hostname)
-                    elif password and self.is_coreelec_with_password(ip, password):
-                        devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
+                # Try key auth first, then password auth
+                if self.keys_exist() and self.is_coreelec(ip):
+                    devices.append({"ip": ip, "hostname": hostname, "key_installed": True})
+                    self.add_paired_device(ip, hostname)
+                elif password and self.is_coreelec_with_password(ip, password):
+                    devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
+                elif not device.get('needs_verification'):
+                    # Can't verify but hostname says CoreELEC - add anyway
+                    devices.append({"ip": ip, "hostname": hostname, "key_installed": False})
 
-        elif avahi_devices is None:
-            # Avahi not available or failed - fall back to IP scanning
-            self.log("Avahi not available, falling back to IP scan...")
+        # Fall back to IP scan if avahi failed or found nothing
+        if not devices:
+            if avahi_devices is None:
+                self.log("Avahi not available, falling back to IP scan...")
+            else:
+                self.log("Avahi found no usable devices, falling back to IP scan...")
             if progress_callback:
-                progress_callback(10, "Avahi unavailable, scanning by IP...")
+                progress_callback(10, "Scanning by IP...")
             devices = self.scan_network_ip_fallback(password, progress_callback)
 
         # Include paired devices that weren't found in scan
@@ -635,7 +631,6 @@ class SkinSync:
                     src = os.path.join(skin_path, item)
                     dst = os.path.join(skin_backup, item)
                     if os.path.isfile(src):
-                        import shutil
                         shutil.copy2(src, dst)
 
             # Backup skinvariables nodes
@@ -647,7 +642,6 @@ class SkinSync:
                     src = os.path.join(skinvariables_nodes, item)
                     dst = os.path.join(widgets_backup, item)
                     if os.path.isfile(src):
-                        import shutil
                         shutil.copy2(src, dst)
 
             # Backup keymaps
@@ -658,7 +652,6 @@ class SkinSync:
                     src = os.path.join(self.KEYMAPS_PATH, item)
                     dst = os.path.join(keymaps_backup, item)
                     if os.path.isfile(src):
-                        import shutil
                         shutil.copy2(src, dst)
 
             self.log(f"Backup created successfully at {backup_path}")
@@ -688,7 +681,7 @@ class SkinSync:
 
         return [options[i][1] for i in selected]
 
-    def sync_skin_to_device(self, target_ip, sync_options=None, do_backup=True):
+    def sync_skin_to_device(self, target_ip, sync_options=None):
         """Sync current skin settings to target device."""
         if sync_options is None:
             sync_options = ["settings", "widgets"]  # Default options
@@ -710,15 +703,12 @@ class SkinSync:
         skinvariables_nodes_path = os.path.join(skinvariables_path, "nodes", skin_name)
         skinvariables_viewtypes = os.path.join(skinvariables_path, f"{skin_name}-viewtypes.json")
 
+        had_errors = False
+
         try:
             # Stop Kodi on target first (prevents it from overwriting settings)
             self.log(f"Stopping Kodi on {target_ip}")
-            subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}", "systemctl stop kodi"],
-                capture_output=True,
-                timeout=60  # Kodi can take a while to stop, especially if busy
-            )
+            self._run_ssh(target_ip, "systemctl stop kodi", timeout=60)
             time.sleep(2)
 
             # Ensure target directories exist
@@ -728,77 +718,56 @@ class SkinSync:
             if "keymaps" in sync_options:
                 mkdir_cmd += f" {self.KEYMAPS_PATH}"
 
-            subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}", mkdir_cmd],
-                capture_output=True,
-                timeout=10
-            )
+            self._run_ssh(target_ip, mkdir_cmd, timeout=10)
 
             # Sync skin settings
             if "settings" in sync_options:
                 self.log(f"Copying skin settings to {target_ip}")
-                result = subprocess.run(
-                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{skin_path}/.", f"{self.username}@{target_ip}:{remote_skin_path}/"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
+                result = self._run_scp(
+                    f"{skin_path}/.",
+                    f"{self.username}@{target_ip}:{remote_skin_path}/")
                 if result.returncode != 0:
                     self.log(f"SCP skin settings failed: {result.stderr}", xbmc.LOGERROR)
+                    had_errors = True
 
             # Sync skinvariables nodes (widget configurations) if they exist
             if "widgets" in sync_options:
                 if os.path.exists(skinvariables_nodes_path):
                     self.log(f"Copying widget configurations to {target_ip}")
-                    result = subprocess.run(
-                        ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                         f"{skinvariables_nodes_path}/.",
-                         f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/"],
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
+                    result = self._run_scp(
+                        f"{skinvariables_nodes_path}/.",
+                        f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/")
                     if result.returncode != 0:
                         self.log(f"SCP widget configs failed: {result.stderr}", xbmc.LOGERROR)
+                        had_errors = True
 
                 # Sync viewtypes.json if it exists
                 if os.path.exists(skinvariables_viewtypes):
                     self.log(f"Copying viewtypes to {target_ip}")
-                    subprocess.run(
-                        ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                         skinvariables_viewtypes,
-                         f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/"],
-                        capture_output=True,
-                        timeout=30
-                    )
+                    result = self._run_scp(
+                        skinvariables_viewtypes,
+                        f"{self.username}@{target_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/",
+                        timeout=30)
+                    if result.returncode != 0:
+                        self.log(f"SCP viewtypes failed: {result.stderr}", xbmc.LOGERROR)
+                        had_errors = True
 
             # Sync keymaps
             if "keymaps" in sync_options:
                 if os.path.exists(self.KEYMAPS_PATH) and os.listdir(self.KEYMAPS_PATH):
                     self.log(f"Copying keymaps to {target_ip}")
-                    result = subprocess.run(
-                        ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                         f"{self.KEYMAPS_PATH}/.",
-                         f"{self.username}@{target_ip}:{self.KEYMAPS_PATH}/"],
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
+                    result = self._run_scp(
+                        f"{self.KEYMAPS_PATH}/.",
+                        f"{self.username}@{target_ip}:{self.KEYMAPS_PATH}/")
                     if result.returncode != 0:
                         self.log(f"SCP keymaps failed: {result.stderr}", xbmc.LOGERROR)
+                        had_errors = True
 
             # Start Kodi on target
             self.log(f"Starting Kodi on {target_ip}")
-            subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                 f"{self.username}@{target_ip}", "systemctl start kodi"],
-                capture_output=True,
-                timeout=10
-            )
+            self._run_ssh(target_ip, "systemctl start kodi", timeout=10)
 
-            return True
+            return not had_errors
 
         except subprocess.TimeoutExpired:
             self.log("Sync timed out", xbmc.LOGERROR)
@@ -825,7 +794,14 @@ class SkinSync:
         skinvariables_path = os.path.join(self.KODI_ADDON_DATA, "script.skinvariables")
         skinvariables_nodes_path = os.path.join(skinvariables_path, "nodes", skin_name)
 
+        had_errors = False
+
         try:
+            # Stop Kodi on source device to get consistent files
+            self.log(f"Stopping Kodi on {source_ip}")
+            self._run_ssh(source_ip, "systemctl stop kodi", timeout=60)
+            time.sleep(2)
+
             # Ensure local directories exist
             os.makedirs(skin_path, exist_ok=True)
             os.makedirs(skinvariables_nodes_path, exist_ok=True)
@@ -834,56 +810,44 @@ class SkinSync:
             # Pull skin settings
             if "settings" in sync_options:
                 self.log(f"Pulling skin settings from {source_ip}")
-                result = subprocess.run(
-                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/{skin_name}/.",
-                     f"{skin_path}/"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
+                result = self._run_scp(
+                    f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/{skin_name}/.",
+                    f"{skin_path}/")
                 if result.returncode != 0:
                     self.log(f"SCP skin settings failed: {result.stderr}", xbmc.LOGERROR)
+                    had_errors = True
 
             # Pull widget configurations
             if "widgets" in sync_options:
                 self.log(f"Pulling widget configurations from {source_ip}")
-                result = subprocess.run(
-                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/.",
-                     f"{skinvariables_nodes_path}/"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
+                result = self._run_scp(
+                    f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/nodes/{skin_name}/.",
+                    f"{skinvariables_nodes_path}/")
                 if result.returncode != 0:
                     self.log(f"SCP widget configs failed: {result.stderr}", xbmc.LOGERROR)
+                    had_errors = True
 
                 # Pull viewtypes.json
                 viewtypes_file = f"{skin_name}-viewtypes.json"
-                subprocess.run(
-                    ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/{viewtypes_file}",
-                     f"{skinvariables_path}/"],
-                    capture_output=True,
-                    timeout=30
-                )
+                result = self._run_scp(
+                    f"{self.username}@{source_ip}:{self.KODI_ADDON_DATA}/script.skinvariables/{viewtypes_file}",
+                    f"{skinvariables_path}/",
+                    timeout=30)
+                if result.returncode != 0:
+                    self.log(f"SCP viewtypes failed: {result.stderr}", xbmc.LOGERROR)
+                    had_errors = True
 
             # Pull keymaps
             if "keymaps" in sync_options:
                 self.log(f"Pulling keymaps from {source_ip}")
-                result = subprocess.run(
-                    ["scp", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{self.username}@{source_ip}:{self.KEYMAPS_PATH}/.",
-                     f"{self.KEYMAPS_PATH}/"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
+                result = self._run_scp(
+                    f"{self.username}@{source_ip}:{self.KEYMAPS_PATH}/.",
+                    f"{self.KEYMAPS_PATH}/")
                 if result.returncode != 0:
                     self.log(f"SCP keymaps failed: {result.stderr}", xbmc.LOGERROR)
+                    had_errors = True
 
-            return True
+            return not had_errors
 
         except subprocess.TimeoutExpired:
             self.log("Pull timed out", xbmc.LOGERROR)
@@ -891,52 +855,14 @@ class SkinSync:
         except Exception as e:
             self.log(f"Pull error: {e}", xbmc.LOGERROR)
             return False
+        finally:
+            # Always restart Kodi on source device
+            self.log(f"Starting Kodi on {source_ip}")
+            try:
+                self._run_ssh(source_ip, "systemctl start kodi", timeout=10)
+            except Exception:
+                self.log(f"Failed to restart Kodi on {source_ip}", xbmc.LOGERROR)
 
-    def sync_to_all_devices(self, sync_options=None, do_backup=True):
-        """Sync to all paired devices."""
-        devices = self.load_paired_devices()
-        if not devices:
-            self.dialog.ok("Skin Sync", "No paired devices found.")
-            return False
-
-        # Verify which devices are reachable
-        reachable = []
-        for d in devices:
-            ip = d.get('ip')
-            if self.keys_exist() and self.is_coreelec(ip):
-                reachable.append(d)
-
-        if not reachable:
-            self.dialog.ok("Skin Sync", "No paired devices are currently reachable.")
-            return False
-
-        # Confirm
-        device_names = [d.get('ip') for d in reachable]
-        if not self.dialog.yesno(
-            "Sync to All Devices",
-            f"Push settings to {len(reachable)} device(s)?\n\n" +
-            "\n".join(device_names) +
-            "\n\nKodi will restart on each device."
-        ):
-            return False
-
-        # Sync to each device
-        success_count = 0
-        for d in reachable:
-            ip = d.get('ip')
-            self.log(f"Syncing to {ip}...")
-            if self.sync_skin_to_device(ip, sync_options, do_backup=False):
-                success_count += 1
-            else:
-                self.log(f"Failed to sync to {ip}", xbmc.LOGERROR)
-
-        self.dialog.notification(
-            "Skin Sync",
-            f"Synced to {success_count}/{len(reachable)} devices",
-            xbmcgui.NOTIFICATION_INFO
-        )
-        return success_count > 0
-    
     def run_setup(self):
         """Run first-time setup wizard."""
         self.dialog.ok(
@@ -1191,7 +1117,7 @@ class SkinSync:
         for i, d in enumerate(reachable):
             ip = d.get('ip')
             progress.create("Skin Sync", f"Syncing to {ip} ({i+1}/{len(reachable)})...")
-            if self.sync_skin_to_device(ip, sync_options, do_backup=False):
+            if self.sync_skin_to_device(ip, sync_options):
                 success_count += 1
             progress.close()
 
@@ -1273,13 +1199,13 @@ class SkinSync:
         progress.close()
 
         if success:
-            # Prompt to reload skin
+            # Prompt to restart Kodi to apply pulled settings
             if self.dialog.yesno(
                 "Pull Complete",
                 "Settings pulled successfully.\n\n"
-                "Reload skin now to apply changes?"
+                "Restart Kodi now to apply changes?"
             ):
-                xbmc.executebuiltin("ReloadSkin()")
+                os.system("systemctl restart kodi")
         else:
             self.dialog.ok("Skin Sync", "Pull failed. Check the log for details.")
 
