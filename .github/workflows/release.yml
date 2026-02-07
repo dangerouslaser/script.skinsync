@@ -20,7 +20,7 @@ jobs:
 
       - name: Update version in addon.xml
         run: |
-          sed -i "s/version=\"[^\"]*\"/version=\"${{ steps.version.outputs.version }}\"/" addon.xml
+          sed -i "s/^\(<addon.*\)version=\"[^\"]*\"/\1version=\"${{ steps.version.outputs.version }}\"/" addon.xml
 
       - name: Package addon zip
         run: |
