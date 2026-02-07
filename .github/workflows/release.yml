@@ -37,3 +37,10 @@ jobs:
             --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger Kodi repository update
+        run: |
+          gh api repos/dangerouslaser/dangerouslaser.github.io/dispatches \
+            -f event_type=addon-released
+        env:
+          GH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN }}
